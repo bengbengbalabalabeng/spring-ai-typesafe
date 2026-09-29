@@ -19,6 +19,7 @@ package org.springaicommunity.typesafe.toolsearch;
 
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springaicommunity.typesafe.TypeSafeClient;
+import org.springaicommunity.typesafe.JsonContent;
 import org.springaicommunity.typesafe.question.Choice;
 import org.springaicommunity.typesafe.question.Noul;
 import org.springaicommunity.typesafe.question.Question;
@@ -106,9 +108,11 @@ public class JevToolIndex implements ToolIndex {
 		Assert.notNull(toolReference, "toolReference must not be null");
 		Assert.hasText(toolReference.toolName(), "toolReference must name a tool");
 		// A ToolIndex is a shared singleton: the advisor re-indexes a session while the
-		// search tool reads it, possibly on another thread. Both maps have to be concurrent,
-		// and the inner one is iterated by candidates() as well as written here.
-		this.sessions.computeIfAbsent(sessionId, key -> new ConcurrentHashMap<>())
+		// search tool reads it, possibly on another thread. The inner map is synchronized
+		// rather than concurrent so it keeps the tools in the order they were indexed: that
+		// order becomes the catalogue and the choice's options, which the model reads
+		// positionally. Re-indexing a tool keeps its place.
+		this.sessions.computeIfAbsent(sessionId, key -> Collections.synchronizedMap(new LinkedHashMap<>()))
 			.put(toolReference.toolName(), toolReference);
 	}
 
@@ -142,9 +146,10 @@ public class JevToolIndex implements ToolIndex {
 		questions.put(SELECTION_QUESTION, selection.build());
 		questions.put(APPLICABILITY_QUESTION, applicabilityQuestion());
 
-		SystemOneResponse response = this.typeSafeClient
-			.systemOne(Map.of(REQUEST_FIELD, toolSearchRequest.query(), TOOLS_FIELD, catalogue(candidates)),
-					questions);
+		// Request first: the model reads the state in order.
+		SystemOneResponse response = this.typeSafeClient.systemOne(
+				JsonContent.object(REQUEST_FIELD, toolSearchRequest.query(), TOOLS_FIELD, catalogue(candidates)),
+				questions);
 
 		double applicability = response.noulValue(APPLICABILITY_QUESTION);
 		if (applicability < this.applicabilityThreshold) {
@@ -180,7 +185,7 @@ public class JevToolIndex implements ToolIndex {
 
 	private ToolSearchResponse searchSingleCandidate(ToolSearchRequest toolSearchRequest, ToolReference only) {
 		SystemOneResponse response = this.typeSafeClient.systemOne(
-				Map.of(REQUEST_FIELD, toolSearchRequest.query(), "tool", describe(only)),
+				JsonContent.object(REQUEST_FIELD, toolSearchRequest.query(), "tool", describe(only)),
 				Map.of(APPLICABILITY_QUESTION,
 						Noul.builder()
 							.instructions("Does the `tool` serve the `user_request`?")
@@ -198,7 +203,11 @@ public class JevToolIndex implements ToolIndex {
 		if (session == null || session.isEmpty()) {
 			return List.of();
 		}
-		List<ToolReference> candidates = new ArrayList<>(session.values());
+		List<ToolReference> candidates;
+		synchronized (session) {
+			// A synchronized map must be locked while it is iterated.
+			candidates = new ArrayList<>(session.values());
+		}
 		String category = toolSearchRequest.categoryFilter();
 		if (StringUtils.hasText(category)) {
 			candidates = candidates.stream().filter(candidate -> matchesCategory(candidate, category)).toList();
@@ -234,20 +243,17 @@ public class JevToolIndex implements ToolIndex {
 	 * The tools as data in the state, so the applicability question has something to judge
 	 * the request against.
 	 */
-	private static List<Map<String, String>> catalogue(List<ToolReference> candidates) {
-		List<Map<String, String>> catalogue = new ArrayList<>(candidates.size());
+	private static List<JsonContent> catalogue(List<ToolReference> candidates) {
+		List<JsonContent> catalogue = new ArrayList<>(candidates.size());
 		for (ToolReference candidate : candidates) {
-			Map<String, String> entry = new LinkedHashMap<>();
-			entry.put("name", candidate.toolName());
-			entry.put("does", describe(candidate));
-			catalogue.add(entry);
+			catalogue.add(JsonContent.object("name", candidate.toolName(), "does", describe(candidate)));
 		}
 		return catalogue;
 	}
 
 	private static Noul applicabilityQuestion() {
 		return Noul.builder()
-			.instructions(Map.of("question",
+			.instructions(JsonContent.object("question",
 					"Does any tool listed in `available_tools` do what the `user_request` needs?", "inspect",
 					"available_tools", "focus",
 					"Whether some listed tool performs the action the request calls for. A request that is "

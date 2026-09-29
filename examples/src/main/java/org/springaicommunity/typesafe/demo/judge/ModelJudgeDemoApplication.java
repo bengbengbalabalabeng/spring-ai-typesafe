@@ -15,9 +15,9 @@
  */
 package org.springaicommunity.typesafe.demo.judge;
 
-import java.util.Map;
 import java.util.Random;
 
+import org.springaicommunity.typesafe.JsonContent;
 import org.springaicommunity.typesafe.TypeSafeClient;
 import org.springaicommunity.typesafe.advisor.JevSelfRefineAdvisor;
 import org.springaicommunity.typesafe.judge.JevJudge;
@@ -130,7 +130,7 @@ public class ModelJudgeDemoApplication {
 				.build(), 0.7d)
 			.noul("is_grounded",
 					Noul.builder()
-						.instructions(Map.of("question",
+						.instructions(JsonContent.object("question",
 								"Does `assistant_answer` stay within what `user_question` asked, without asserting "
 										+ "unrelated facts?",
 								"note",
